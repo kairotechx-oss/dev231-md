@@ -3,7 +3,8 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { URL } from 'url';
-import { startSession, listSessionNumbers, restoreSessions, startWatchdog } from '../utils/connector.js';
+import { startSession, listSessionNumbers, restoreSessions, startWatchdog, shutdownSessions } from '../utils/connector.js';
+import { DATA_DIR } from '../utils/paths.js';
 import { BOT_VERSION, BOT_NAME } from '../config.js';
 import { COMMAND_COUNT } from '../utils/commandList.js';
 
@@ -523,6 +524,10 @@ export async function startPairingServer(handleMessage) {
         }
     });
 
+    server.keepAliveTimeout = 65000;
+    server.headersTimeout = 70000;
+    server.maxConnections = 2000;
+
     server.listen(PORT, '0.0.0.0', () => {
         console.log(`Pairing website listening on port ${PORT}`);
 
@@ -531,28 +536,72 @@ export async function startPairingServer(handleMessage) {
         restoreSessions(handleMessage).catch((e) => console.error('restoreSessions:', e?.message || e));
         startWatchdog(handleMessage);
 
-        // Keep-alive: ping our own public URL so free hosts do not put the site/bot to sleep.
-        // Set APP_URL (or it is auto-detected on Railway/Render) to enable.
-        const publicUrl = process.env.APP_URL
-            || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '')
-            || process.env.RENDER_EXTERNAL_URL || '';
+        // Keep-alive (same idea as NEXORA MD): ping /health locally AND on the public URL every minute so the
+        // host never considers the service idle. APP_URL / KEEPALIVE_URL, or auto-detected on Railway/Render/Koyeb/Fly.
+        const env = process.env;
+        const direct = env.KEEPALIVE_URL || env.APP_URL || env.PUBLIC_URL || env.RENDER_EXTERNAL_URL;
+        const publicUrl = direct
+            || (env.RAILWAY_PUBLIC_DOMAIN ? `https://${env.RAILWAY_PUBLIC_DOMAIN}` : '')
+            || (env.KOYEB_PUBLIC_DOMAIN ? `https://${env.KOYEB_PUBLIC_DOMAIN}` : '')
+            || (env.FLY_APP_NAME ? `https://${env.FLY_APP_NAME}.fly.dev` : '');
+        const targets = [`http://127.0.0.1:${PORT}/health`];
         if (publicUrl) {
-            const ping = () => fetch(`${publicUrl.replace(/\/$/, '')}/health`, { cache: 'no-store' })
-                .catch((e) => console.log('keep-alive ping failed:', e?.message || e));
-            setInterval(ping, 4 * 60 * 1000).unref();
-            console.log(`🔔 Keep-alive enabled -> ${publicUrl}/health`);
+            try { targets.push(new URL('/health', /^https?:\/\//i.test(publicUrl) ? publicUrl : `https://${publicUrl}`).href); } catch {}
         }
+        const sec = Number.parseInt(env.KEEPALIVE_SEC ?? '', 10);
+        const everyMs = (Number.isFinite(sec) && sec >= 20 ? sec : 60) * 1000;
+        setInterval(() => {
+            for (const u of targets) fetch(u, { cache: 'no-store', signal: AbortSignal.timeout(15000) }).catch(() => {});
+        }, everyMs).unref();
+        console.log(`🔔 Keep-alive every ${everyMs / 1000}s -> ${targets.join(' , ')}`);
+
+        // Memory guard: a bot with many sessions can grow until the host kills it (OOM) and everybody goes offline.
+        // Limit = MEMORY_LIMIT_MB, else the container limit (cgroup), else no guard.
+        const readLimitMb = () => {
+            if (Number(env.MEMORY_LIMIT_MB) > 0) return Number(env.MEMORY_LIMIT_MB);
+            for (const f of ['/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes']) {
+                try {
+                    const v = fs.readFileSync(f, 'utf8').trim();
+                    const n = Number(v);
+                    if (Number.isFinite(n) && n > 0 && n < 1e13) return Math.round(n / 1024 / 1024);
+                } catch {}
+            }
+            return 0;
+        };
+        const limitMb = readLimitMb();
+        let hot = 0;
 
         // Memory/uptime heartbeat in the logs, useful to spot crashes and OOM kills.
         setInterval(() => {
             const mb = Math.round(process.memoryUsage().rss / 1024 / 1024);
             let disk = '';
             try {
-                const st = fs.statfsSync(process.env.DATA_DIR || '.');
+                const st = fs.statfsSync(DATA_DIR);
                 disk = ` | disk free ${Math.round((st.bavail * st.bsize) / 1024 / 1024)}MB`;
             } catch {}
-            console.log(`💓 uptime ${Math.round(process.uptime() / 60)}min | memory ${mb}MB${disk} | sessions online ${listSessionNumbers().length}`);
-        }, 5 * 60 * 1000).unref();
+            console.log(`💓 uptime ${Math.round(process.uptime() / 60)}min | memory ${mb}MB${limitMb ? `/${limitMb}MB` : ''}${disk} | sessions online ${listSessionNumbers().length}`);
+
+            if (limitMb && mb > limitMb * 0.88) {
+                try { global.gc?.(); } catch {}
+                hot++;
+                // still very high after a GC, twice in a row: restart cleanly (sessions are on the volume and come back by themselves)
+                if (hot >= 2 && Math.round(process.memoryUsage().rss / 1024 / 1024) > limitMb * 0.92) {
+                    console.error(`🧯 Memory ${mb}MB near the ${limitMb}MB limit: restarting cleanly before the host kills the bot.`);
+                    shutdownSessions().finally(() => setTimeout(() => process.exit(1), 1500));
+                }
+            } else hot = 0;
+        }, 60 * 1000).unref();
+
+        // Redeploy / stop: close the sockets without logging out so the sessions stay valid.
+        let stopping = false;
+        const stop = (sig) => {
+            if (stopping) return;
+            stopping = true;
+            console.log(`🛑 ${sig} received: closing sessions (they stay saved)…`);
+            shutdownSessions().finally(() => { try { server.close(); } catch {} setTimeout(() => process.exit(0), 1500); });
+        };
+        process.on('SIGTERM', () => stop('SIGTERM'));
+        process.on('SIGINT', () => stop('SIGINT'));
     });
 
     return server;
