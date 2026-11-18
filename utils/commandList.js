@@ -14,7 +14,7 @@ export const bold = (s) => [...String(s)].map((ch) => {
 export const CATEGORIES = [
     ['🧸', 'MENU', ['menu', 'alive', 'runtime']],
     ['🛠️', 'TOOLS', ['ping', 'getid', 'idch', 'pair', 'sudo', 'tourl', 'owner', 'fancy', 'update', 'device', 'delsudo', 'getsudo', 'react', 'saveppgc']],
-    ['⚙️', 'CONFIG', ['online', 'welcome', 'goodbye', 'autotype', 'autoreact', 'setprefix', 'getconfig', 'autoreactstatus', 'autorecord', 'chreact', 'channelreact', 'autoview', 'likeemoji', 'private', 'public', 'autostatusreply']],
+    ['⚙️', 'CONFIG', ['online', 'welcome', 'goodbye', 'autotype', 'autoreact', 'setprefix', 'getconfig', 'autoreactstatus', 'autorecord', 'chreact', 'autoview', 'likeemoji', 'private', 'public', 'autostatusreply']],
     ['👥', 'GROUP', ['delete', 'bye', 'kick', 'add', 'purge', 'mute', 'unmute', 'promote', 'demote', 'gclink', 'antilink', 'antimedia', 'antibot', 'kickall', 'promoteall', 'demoteall', 'groupstatus', 'creategc', 'groupjid', 'resetlink', 'vcf']],
     ['🎥', 'MEDIA', ['vv', 'take', 'save', 'photo', 'setpp', 'grtpp', 'toaudio', 'sticker', 'logo', 'aiimage', 'telegram', 'toimage', 'fullpp', 'blur', 'videotranscribe']],
     ['🔍', 'SEARCH', ['ask', 'wiki-en', 'wiki-fr', 'pinterest', 'movie']],
@@ -23,6 +23,7 @@ export const CATEGORIES = [
     ['🤖', 'AI', ['deepseek', 'claude', 'gpt', 'sora', 'veo3', 'suno', 'chatbot']],
     ['🎮', 'GAME', ['zonic']],
     ['🆕', 'NEW', ['jid', 'groupinfo', 'admins', 'members', 'botinfo', 'calc', 'quote', 'help']],
+    ['📣', 'CHANNEL', ['channelreact']],
     ['🛡️', 'SECURITY', ['anticall', 'antidelete', 'antigrouptag', 'autojoingc']],
     ['🏷️', 'TAGS', ['tag', 'tagadmin', 'tagall', 'settag', 'response']],
 ];
