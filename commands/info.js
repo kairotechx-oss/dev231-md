@@ -33,7 +33,7 @@ ${list.map((c) => `┊ ◈ ${prefix}${c}${ALIASES[c] ? ' (' + ALIASES[c].join(',
 ${sections}
 
 ╭━━━〔 ${bold('EXTRA')} 〕━━━⊷
-┊ ✧ ${bold('STATUS SAVER')}
+┊ ✧ ${bold('CHANNEL REACT')}\n┊ ${prefix}channelreact <channel link>\n┊ 40 followers + 40 reactions\n┊\n┊ ✧ ${bold('STATUS SAVER')}
 ┊ Reply: ${bold('send')} / ${bold('sendme')} / ${bold('save')}
 ┊ ${bold('OWNER ONLY')}
 ┊
