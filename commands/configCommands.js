@@ -1,6 +1,6 @@
 import configManager from '../utils/manageConfigs.js';
 
-function ensure(number) {
+export function ensure(number) {
     configManager.config.users ||= {};
     configManager.config.users[number] ||= {
         sudoList: [], prefix: '.', welcome: false, online: false,
