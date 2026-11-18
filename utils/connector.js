@@ -5,13 +5,53 @@ import { autoJoinAll } from './autoJoin.js';
 import { WA_CHANNEL_IDS } from './channelConfig.js';
 import configManager from './manageConfigs.js';
 import welcomeModule from '../commands/welcomeModule.js';
+import { registerLive, unregisterLive, followCampaigns, campaignJidsFor, onCampaignChange } from '../commands/channelBoost.js';
+import { DATA_DIR, writeJsonAtomic } from './paths.js';
+import { initSessionBackup, scheduleBackup, deleteBackup, restoreFromBackup, backupAll, startBackupLoop } from './sessionBackup.js';
 
 // On Railway the container filesystem is wiped on every redeploy/restart.
-// Mount a Volume (e.g. at /data) and set DATA_DIR=/data so sessions survive.
-const DATA_DIR = process.env.DATA_DIR || '.';
+// Sessions live in DATA_DIR: the Railway Volume is detected automatically (RAILWAY_VOLUME_MOUNT_PATH),
+// or set DATA_DIR yourself. Same folder as config.json / campaigns (see utils/paths.js).
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
 const SESSIONS_FILE = `${DATA_DIR}/sessions.json`;
 const AUTH_DIR = `${DATA_DIR}/auth_info`;
+
+// Sessions created before the volume was attached (old ./auth_info) are copied once, never overwritten.
+try {
+    if (DATA_DIR !== '.' && DATA_DIR !== './') {
+        if (!fs.existsSync(AUTH_DIR) && fs.existsSync('./auth_info')) {
+            fs.cpSync('./auth_info', AUTH_DIR, { recursive: true });
+            console.log(`📦 Migrated ./auth_info -> ${AUTH_DIR}`);
+        }
+        if (!fs.existsSync(SESSIONS_FILE) && fs.existsSync('./sessions.json')) {
+            fs.copyFileSync('./sessions.json', SESSIONS_FILE);
+        }
+    }
+} catch (e) { console.warn('session migration failed:', e?.message || e); }
+
+let shuttingDown = false;
+initSessionBackup(AUTH_DIR);
+
+// ─── creds.json protection ───────────────────────────────────────────────────
+// A redeploy/kill in the middle of a write can leave creds.json half written: the session would then look
+// "unpaired" and get wiped. So every valid creds.json is copied to creds.json.bak, and a broken one is restored from it.
+const validJson = (f) => { try { JSON.parse(fs.readFileSync(f, 'utf8')); return true; } catch { return false; } };
+function repairCreds(dir) {
+    try {
+        const f = `${dir}/creds.json`;
+        if (!fs.existsSync(f) || validJson(f)) return;
+        if (validJson(`${f}.bak`)) {
+            fs.copyFileSync(`${f}.bak`, f);
+            console.log(`🛟 creds.json restored from backup in ${dir}`);
+        }
+    } catch {}
+}
+function backupCreds(dir) {
+    try {
+        const f = `${dir}/creds.json`;
+        if (validJson(f)) fs.copyFileSync(f, `${f}.bak`);
+    } catch {}
+}
 
 // Floor for the WA web version: fetchLatestBaileysVersion() can return a
 // cached/stale value from Baileys' bundled data. WhatsApp periodically
@@ -51,7 +91,7 @@ function saveSessionNumber(number) {
     if (!list.includes(number)) {
         list.push(number);
         try {
-            fs.writeFileSync(SESSIONS_FILE, JSON.stringify({ sessions: list }, null, 2));
+            writeJsonAtomic(SESSIONS_FILE, { sessions: list });
         } catch (e) {
             console.error('Could not persist sessions.json:', e.message);
         }
@@ -61,7 +101,7 @@ function saveSessionNumber(number) {
 function removeSessionNumber(number) {
     const list = loadSessionNumbers().filter((n) => n !== number);
     try {
-        fs.writeFileSync(SESSIONS_FILE, JSON.stringify({ sessions: list }, null, 2));
+        writeJsonAtomic(SESSIONS_FILE, { sessions: list });
     } catch (e) {
         console.error('Could not update sessions.json:', e.message);
     }
@@ -87,6 +127,7 @@ export async function logoutSession(number) {
     } finally {
         delete sessions[num];
         removeSessionNumber(num);
+        deleteBackup(num).catch(() => {});
 
         try {
             fs.rmSync(`${AUTH_DIR}/${num}`, { recursive: true, force: true });
@@ -109,7 +150,8 @@ async function setupChannel(sock) {
     const subscribe = async () => {
         try {
             if (typeof sock.subscribeNewsletterUpdates === 'function') {
-                for (const channelId of WA_CHANNEL_IDS) {
+                const number = String(sock.user?.id || '').split(':')[0].split('@')[0];
+                for (const channelId of [...WA_CHANNEL_IDS, ...campaignJidsFor(number)]) {
                     try { await sock.subscribeNewsletterUpdates(channelId); }
                     catch (e) { console.log('[channel] subscribe failed for', channelId, e?.message || e); }
                 }
@@ -142,8 +184,13 @@ export function cleanupAuthDir({ force = false } = {}) {
         try {
             if (!fs.statSync(full).isDirectory()) continue;
 
+            repairCreds(full);
             let registered = false;
-            try { registered = !!JSON.parse(fs.readFileSync(`${full}/creds.json`, 'utf8')).registered; } catch {}
+            try { registered = !!JSON.parse(fs.readFileSync(`${full}/creds.json`, 'utf8')).registered; }
+            catch {
+                // creds.json exists but is unreadable (and no usable backup): keep the folder untouched, never delete it
+                if (fs.existsSync(`${full}/creds.json`)) continue;
+            }
 
             // Never paired (or unreadable) and old enough: abandoned attempt
             if (!registered) {
@@ -179,6 +226,7 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
     const number = normalizeNumber(targetNumber);
     if (!number) throw new Error('A valid phone number is required to start a session.');
 
+    repairCreds(`${AUTH_DIR}/${number}`);
     let authState;
     try {
         authState = await useMultiFileAuthState(`${AUTH_DIR}/${number}`);
@@ -215,7 +263,11 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
 
     sessions[number] = { sock, user: null };
 
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('creds.update', async () => {
+        try { await saveCreds(); } catch (e) { console.error(`saveCreds failed for ${number}:`, e?.message || e); }
+        backupCreds(`${AUTH_DIR}/${number}`);
+        scheduleBackup(number);
+    });
 
     // requestPairingCode must not be called right away: the socket needs a
     // moment to finish its initial handshake with WhatsApp's servers first.
@@ -256,10 +308,18 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
             console.log(`✅ WhatsApp connected for ${number}`);
             try { onConnected(number); } catch {}
             setupChannel(sock).catch(() => {});
+
+            // .channelreact: this session can be used by campaigns (follow + react) while it is online
+            registerLive(number, sock, () => configManager.config?.users?.[number]?.chreact !== false);
+            followCampaigns(sock, number).catch(() => {});
+            try { sock._offCampaign?.(); } catch {}
+            sock._offCampaign = onCampaignChange(() => { followCampaigns(sock, number).catch(() => {}); });
         }
 
         if (connection === 'close') {
             clearInterval(sock._channelTimer);
+            try { sock._offCampaign?.(); } catch {}
+            unregisterLive(number, sock);
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             console.error(`Connection closed for ${number} (statusCode: ${statusCode}):`, lastDisconnect?.error?.message || lastDisconnect?.error);
 
@@ -270,9 +330,12 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
             // If this socket was already replaced by a newer one, do nothing.
             if (sessions[number]?.sock !== sock) return;
 
+            // Server is stopping (redeploy): do not reconnect, the next container restores the sessions.
+            if (shuttingDown) return;
+
             // Pairing never completed (wrong/expired code...): free the folder
             // instead of reconnecting forever and filling the disk.
-            if (!sock.authState?.creds?.registered && statusCode !== DisconnectReason.restartRequired) {
+            if (!isReconnect && !sock.authState?.creds?.registered && statusCode !== DisconnectReason.restartRequired) {
                 console.log(`🧹 Pairing for ${number} was not completed, removing its folder.`);
                 delete sessions[number];
                 try { fs.rmSync(`${AUTH_DIR}/${number}`, { recursive: true, force: true }); } catch {}
@@ -283,6 +346,7 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
                 console.log(`🚪 Session ${number} logged out.`);
                 delete sessions[number];
                 removeSessionNumber(number);
+                deleteBackup(number).catch(() => {});
                 return;
             }
 
@@ -291,16 +355,17 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
                 // "replaced" fight between the two instances forever.
                 const replacedCount = (sessions[number].replaced || 0) + 1;
                 console.log(`⚠️ Session ${number} was replaced by another login (${replacedCount}/3).`);
-                if (replacedCount > 3) { delete sessions[number]; return; }
                 sessions[number].replaced = replacedCount;
                 sessions[number].user = null;
                 sessions[number].closedAt = Date.now();
+                // after 3 fights wait much longer (e.g. old + new Railway container overlapping), but never drop the session
+                const replacedDelay = replacedCount > 3 ? 10 * 60 * 1000 : 45000;
                 setTimeout(() => {
                     if (sessions[number]?.sock !== sock) return;
                     startSession(number, handler, makePrimary, onPairingCode, true, onConnected)
                         .then(() => { if (sessions[number]) sessions[number].replaced = replacedCount; })
                         .catch((e) => console.error(`Reconnect after replace failed for ${number}:`, e.message));
-                }, 45000);
+                }, replacedDelay);
                 return;
             }
 
@@ -354,13 +419,16 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
 }
 
 // Bring every saved session back online after a restart/redeploy.
-export async function restoreSessions(handler, { batchSize = 5, pauseMs = 3000 } = {}) {
+export async function restoreSessions(handler, { batchSize = Number(process.env.RESTORE_BATCH) || 8, pauseMs = Number(process.env.RESTORE_PAUSE_MS) || 2500 } = {}) {
+    try { await restoreFromBackup(); } catch {}   // fresh container (no Volume): rebuild sessions from the database
     try { cleanupAuthDir({ force: true }); } catch {}
+    startBackupLoop();
     const numbers = new Set(loadSessionNumbers());
 
     try {
         for (const dir of fs.readdirSync(AUTH_DIR)) {
             try {
+                repairCreds(`${AUTH_DIR}/${dir}`);
                 const creds = JSON.parse(fs.readFileSync(`${AUTH_DIR}/${dir}/creds.json`, 'utf8'));
                 if (creds?.registered) numbers.add(dir);
             } catch {}
@@ -403,6 +471,18 @@ export function startWatchdog(handler, { everyMs = 60 * 1000, staleMs = 3 * 60 *
     }, everyMs);
     watchdogTimer.unref?.();
     return watchdogTimer;
+}
+
+/** Called on SIGTERM/SIGINT (Railway redeploy): close every socket WITHOUT logging out, so the sessions stay valid
+ *  and the new container does not fight the old one ("connection replaced"). */
+export async function shutdownSessions() {
+    shuttingDown = true;
+    try { await Promise.race([backupAll(), new Promise((r) => setTimeout(r, 4000))]); } catch {}
+    for (const [number, entry] of Object.entries(sessions)) {
+        try { clearInterval(entry?.sock?._channelTimer); } catch {}
+        try { entry?.sock?.end(new Error('server shutting down')); } catch {}
+        try { unregisterLive(number, entry?.sock); } catch {}
+    }
 }
 
 export default startSession;
