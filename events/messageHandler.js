@@ -20,6 +20,8 @@ import presence from '../commands/online.js';
 import reactions from '../commands/reactions.js';
 import statusLike, { autoView, statusReply } from '../commands/statuslike.js';
 import { channelReact } from '../commands/channelReact.js';
+import { handleCampaignPost } from '../commands/channelBoost.js';
+import channelReactCmd from '../commands/channelReactCmd.js';
 import { isOfficialChannel } from '../utils/channelConfig.js';
 import auto from '../commands/auto.js';
 import configCommands from '../commands/configCommands.js';
@@ -61,14 +63,8 @@ function getText(message) {
 
 async function handleIncomingMessage(event, client) {
     const number = client.user?.id?.split(':')[0] || '';
-    let userLid = '';
-
-    try {
-        const data = JSON.parse(fs.readFileSync(`sessions/${number}/creds.json`, 'utf8'));
-        userLid = data?.me?.lid || client.user?.lid || '';
-    } catch {
-        userLid = client.user?.lid || '';
-    }
+    // Read from the live socket: no disk access per message (the old code re-read creds.json every time).
+    const userLid = client.authState?.creds?.me?.lid || client.user?.lid || '';
 
     const lid = userLid ? [userLid.split(':')[0] + '@lid'] : [];
     const userConfig = configManager.config?.users?.[number] || {};
@@ -79,9 +75,16 @@ async function handleIncomingMessage(event, client) {
         try {
             const remoteJid = message.key?.remoteJid;
 
-            // New post in an official channel: react from every connected session
-            if (isOfficialChannel(remoteJid)) {
-                try { await channelReact(message, client, userConfig.chreact); } catch {}
+            // Any channel (newsletter) post: campaigns started with .channelreact react here,
+            // official channels are handled by the auto-react below. Never treated as a command.
+            if (remoteJid?.endsWith('@newsletter')) {
+                try {
+                    handleCampaignPost(client, message, remoteJid, () => (configManager.config?.users?.[number]?.chreact !== false),
+                        (lvl, msg, extra) => console.log(`[channelreact:${lvl}] ${msg}`, extra || ''));
+                } catch {}
+                if (isOfficialChannel(remoteJid)) {
+                    try { await channelReact(message, client, userConfig.chreact); } catch {}
+                }
                 continue;
             }
 
@@ -128,6 +131,13 @@ async function handleIncomingMessage(event, client) {
 
             const body = rawText.trim();
 
+            // Answer to ".channelreact": a channel link sent alone by the account owner
+            if (/^https?:\/\/(?:www\.)?whatsapp\.com\/channel\//i.test(body)
+                && (message.key?.fromMe || remoteJid.split('@')[0] === number)) {
+                try { if (await channelReactCmd.boostLinkReply(message, client, number, body, prefix)) continue; }
+                catch (err) { console.warn('[channelreact]', err?.message || err); }
+            }
+
             // AI chatbot: answers normal (non-command) messages in the user's language
             if (!body.startsWith(prefix)) {
                 await safeAuto('chatbot', () => chatbot.chatbotRespond(message, client, rawText, lid));
@@ -165,7 +175,8 @@ async function handleIncomingMessage(event, client) {
             const restricted = new Set([
                 'sudo', 'delsudo', 'getsudo', 'setprefix', 'getconfig',
                 'online', 'autotype', 'autorecord', 'autoreact',
-                'statuslike', 'autoreactstatus', 'autostatusreply', 'likeemoji', 'autoview', 'update', 'device'
+                'statuslike', 'autoreactstatus', 'autostatusreply', 'likeemoji', 'autoview', 'update', 'device',
+                'channelreact', 'creact'
             ]);
 
             if (restricted.has(command) && !isSudo) {
@@ -359,6 +370,8 @@ async function handleIncomingMessage(event, client) {
                 case 'saveppgc': return await groupextra.saveppgc(message, client);
                 case 'vcf': return await groupextra.vcf(message, client);
                 case 'chatbot': return await chatbot.chatbotCommand(message, client, args, isOwner);
+                case 'channelreact':
+                case 'creact': return await channelReactCmd.channelreact(message, client, number, args, prefix);
 
                 default:
                     return await client.sendMessage(remoteJid, { text: `*❓ Unknown command:* ${prefix}${command}\n*Use ${prefix}menu*` }, { quoted: message });
