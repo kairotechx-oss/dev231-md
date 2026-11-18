@@ -61,10 +61,14 @@ async function applyLink(message, client, number, prefix, link, postHint = null)
         lines.push('ℹ️ This channel accepts only the 6 basic reactions (👍 ❤️ 😂 😮 😢 🙏), so only those are used.',
             'To allow all emojis: Channel settings → Reactions → All emojis.');
     }
+    if (res.pending && res.reacts < Math.min(res.pool, BOOST_SIZE)) {
+        lines.push('🔁 The missing reactions are sent automatically in the next minutes (no need to do anything).');
+    }
     if (!res.reacts) {
         lines.push('⚠️ No reaction could be sent. Check that the link is a channel you can see, then try again in a minute.');
         if (lastBoostError()) lines.push(`Reason : ${lastBoostError()}`);
     }
+    if (res.reacts < Math.min(res.pool, BOOST_SIZE) && lastBoostError()) lines.push(`Last error : ${lastBoostError()}`);
     lines.push(`Every day : new reactions, for ${DAYS} days.`, 'New posts : reacted automatically.', `Change channel : ${prefix}channelreact <new link>`);
     return reply(box('✅ CHANNEL REACT', lines));
 }
