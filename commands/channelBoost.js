@@ -447,15 +447,23 @@ export async function giveBoost(sock, campaign, log = () => {}) {
         followers = await followWith(pool, c.jid, log);
         if (!followers) c.followedAt = 0; // nothing happened: allow a retry
     }
-    await pause(2000, 800); // let the follows settle before asking for the posts
+    await pause(2500, 800); // let the follows settle before asking for the posts
     try { await sock.newsletterFollow?.(c.jid); } catch { /* already following */ }
-    let ids = c.postHint ? [c.postHint] : await latestPostIds(sock, c.jid, 1, log);
-    for (let k = 0; !ids.length && k < Math.min(3, pool.length); k++) ids = await latestPostIds(pool[k][1].socket, c.jid, 1, log);
+    // Right after a follow WhatsApp can answer "no posts" for a few seconds: ask again a few times, from several accounts.
+    let ids = c.postHint ? [c.postHint] : [];
+    for (let attempt = 0; attempt < 3 && !ids.length; attempt++) {
+        if (attempt) await pause(4000, 1500);
+        ids = await latestPostIds(sock, c.jid, 1, log);
+        for (let k = 0; !ids.length && k < Math.min(3, pool.length); k++) ids = await latestPostIds(pool[k][1].socket, c.jid, 1, log);
+    }
     const reacts = ids.length ? await reactWith(pool, c.jid, ids[0], c.emojis, log) : 0;
+    // Not everybody reacted (or the post id could not be read yet): the engine keeps retrying by itself every 2 minutes.
+    c.pending = reacts < Math.min(pool.length, BOOST_SIZE);
+    c.retries = 0;
     c.nextRound = Date.now() + ROUND_MS;
     saveState();
     refreshAll(); // members subscribe to the live updates of the channel
-    return { pool: pool.length, followers, followersSkipped, reacts };
+    return { pool: pool.length, followers, followersSkipped, reacts, pending: Boolean(c.pending) };
 }
 
 /** Daily round: the members that did not react yet react to the latest post of the channel. */
@@ -473,8 +481,46 @@ async function dailyRound(c, log) {
     if (todo.length) await reactWith(todo, c.jid, ids[0], c.emojis, log);
 }
 
+/** Members that did not react yet react to the latest post (used by the automatic retry). */
+async function topUp(c, log) {
+    const members = new Set(c.members || []);
+    const list = pickSessions(c.ownerId, new Set(), BOOST_SIZE * 5).filter(([sid]) => members.has(sid));
+    if (!list.length) return;
+    let ids = c.postHint ? [c.postHint] : [];
+    const askers = [live.get(c.ownerId), ...list.slice(0, 4).map(([, x]) => x)].filter((x) => x && isOnline(x));
+    for (const a of askers) {
+        if (ids.length) break;
+        ids = await latestPostIds(a.socket, c.jid, 1, log);
+    }
+    if (!ids.length) return;
+    const key = `${c.jid}:${ids[0]}`;
+    const done = reactedOn.get(key) || new Set();
+    const todo = list.filter(([sid]) => !done.has(sid)).slice(0, Math.max(0, BOOST_SIZE - done.size));
+    if (todo.length) await reactWith(todo, c.jid, ids[0], c.emojis, log);
+    const total = (reactedOn.get(key) || new Set()).size;
+    if (total >= Math.min(members.size, BOOST_SIZE) || (total > 0 && !todo.length)) c.pending = false;
+    saveState();
+}
+
+let retryTicker = null;
+function startRetryTicker() {
+    if (retryTicker) return;
+    retryTicker = setInterval(async () => {
+        for (const c of campaigns.values()) {
+            if (!c.pending || c.busy || (c.retries || 0) >= 20) continue;
+            c.busy = true;
+            c.retries = (c.retries || 0) + 1;
+            try { await topUp(c, (lvl, msg, extra) => console.log(`[channelreact:${lvl}] ${msg}`, extra || '')); }
+            catch (e) { console.log('[channelreact] retry failed:', String(e?.message || '').slice(0, 60)); }
+            finally { c.busy = false; }
+        }
+    }, 2 * 60 * 1000);
+    retryTicker.unref?.();
+}
+
 let ticker = null;
 function startTicker() {
+    startRetryTicker();
     if (ticker) return;
     ticker = setInterval(async () => {
         sweep();
