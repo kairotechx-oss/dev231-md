@@ -1,169 +1,80 @@
-import axios from 'axios';
-import yts from 'yt-search';
+// .vv — recovers a view-once photo / video / voice note: reply to it with .vv
+// and the media is sent back in the chat as a normal (re-viewable) message.
+import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { OWNER_NAME } from '../config.js';
 
-const AXIOS_DEFAULTS = {
-    timeout: 60000,
-    headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*'
-    }
-};
+const MAX_BYTES = 64 * 1024 * 1024;
 
-const YT_REGEX = /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|v\/|embed\/|shorts\/|live\/))([a-zA-Z0-9_-]{11})/i;
-
-async function tryRequest(getter, attempts = 3) {
-    let lastError;
-    for (let attempt = 1; attempt <= attempts; attempt++) {
-        try {
-            return await getter();
-        } catch (err) {
-            lastError = err;
-            if (attempt < attempts) await new Promise(r => setTimeout(r, 1000 * attempt));
-        }
+// Peels every wrapper WhatsApp can put around a message (view once V1/V2/V2 extension, ephemeral, caption doc).
+function unwrap(msg) {
+    let cur = msg;
+    for (let i = 0; i < 8 && cur; i++) {
+        const inner = cur.viewOnceMessageV2?.message
+            || cur.viewOnceMessageV2Extension?.message
+            || cur.viewOnceMessage?.message
+            || cur.ephemeralMessage?.message
+            || cur.documentWithCaptionMessage?.message
+            || cur.editedMessage?.message;
+        if (!inner) break;
+        cur = inner;
     }
-    throw lastError;
+    return cur || null;
 }
 
-// ─── download sources (tried in order): EliteProTech → Yupra → Okatsu ───────
-async function getEliteProTechVideoByUrl(youtubeUrl) {
-    const apiUrl = `https://eliteprotech-apis.zone.id/ytdown?url=${encodeURIComponent(youtubeUrl)}&format=mp4`;
-    const res = await tryRequest(() => axios.get(apiUrl, AXIOS_DEFAULTS));
-    if (res?.data?.success && res?.data?.downloadURL) {
-        return { download: res.data.downloadURL, title: res.data.title };
-    }
-    throw new Error('EliteProTech ytdown returned no download');
+function findMedia(content) {
+    if (!content) return null;
+    if (content.imageMessage) return { kind: 'image', node: content.imageMessage };
+    if (content.videoMessage) return { kind: 'video', node: content.videoMessage };
+    if (content.audioMessage) return { kind: 'audio', node: content.audioMessage };
+    return null;
 }
 
-async function getYupraVideoByUrl(youtubeUrl) {
-    const apiUrl = `https://api.yupra.my.id/api/downloader/ytmp4?url=${encodeURIComponent(youtubeUrl)}`;
-    const res = await tryRequest(() => axios.get(apiUrl, AXIOS_DEFAULTS));
-    if (res?.data?.success && res?.data?.data?.download_url) {
-        return {
-            download: res.data.data.download_url,
-            title: res.data.data.title,
-            thumbnail: res.data.data.thumbnail
-        };
-    }
-    throw new Error('Yupra returned no download');
-}
+const num = (v) => (v && typeof v === 'object' && typeof v.toNumber === 'function' ? v.toNumber() : Number(v) || 0);
 
-async function getOkatsuVideoByUrl(youtubeUrl) {
-    const apiUrl = `https://okatsu-rolezapiiz.vercel.app/downloader/ytmp4?url=${encodeURIComponent(youtubeUrl)}`;
-    const res = await tryRequest(() => axios.get(apiUrl, AXIOS_DEFAULTS));
-    // shape: { status, creator, url, result: { status, title, mp4 } }
-    if (res?.data?.result?.mp4) {
-        return { download: res.data.result.mp4, title: res.data.result.title };
-    }
-    throw new Error('Okatsu ytmp4 returned no mp4');
-}
-
-async function downloadBuffer(url) {
-    const res = await axios.get(url, {
-        ...AXIOS_DEFAULTS,
-        responseType: 'arraybuffer',
-        timeout: 180000,
-        maxContentLength: 120 * 1024 * 1024,
-        maxBodyLength: 120 * 1024 * 1024
-    });
-    return Buffer.from(res.data);
-}
-
-// ─── .video / .ytmp4 <name or youtube link> ─────────────────────────────────
-export async function video(message, client, searchQuery) {
+export async function viewonce(message, client) {
     const remoteJid = message.key.remoteJid;
     const q = { quoted: message };
-    searchQuery = (searchQuery || '').trim();
+    const say = (text) => client.sendMessage(remoteJid, { text }, q);
 
-    if (!searchQuery) {
-        return client.sendMessage(remoteJid, { text: '🎬 What video do you want to download?\nExample: .video faded alan walker' }, q);
+    const root = unwrap(message.message);
+    const ci = root?.extendedTextMessage?.contextInfo || root?.imageMessage?.contextInfo || root?.videoMessage?.contextInfo;
+    if (!ci?.quotedMessage) {
+        return say('👁️ Reply to a view-once photo, video or voice note with .vv');
     }
 
+    const content = unwrap(ci.quotedMessage);
+    const media = findMedia(content);
+    if (!media) return say('❌ No photo, video or audio found in that message.');
+    if (num(media.node.fileLength) > MAX_BYTES) return say('❌ Media too big (max 64 MB).');
+
+    try { await client.sendMessage(remoteJid, { react: { text: '⏳', key: message.key } }); } catch {}
+
+    const fake = {
+        key: { remoteJid, id: ci.stanzaId, participant: ci.participant, fromMe: false },
+        message: content,
+    };
+
+    let buffer = null;
     try {
-        let videoUrl = '';
-        let videoTitle = '';
-        let videoThumbnail = '';
-
-        if (/^https?:\/\//i.test(searchQuery)) {
-            videoUrl = searchQuery;
-            if (!YT_REGEX.test(videoUrl)) {
-                return client.sendMessage(remoteJid, { text: '❌ This is not a valid YouTube link!' }, q);
-            }
-        } else {
-            const { videos } = await yts(searchQuery);
-            if (!videos || videos.length === 0) {
-                return client.sendMessage(remoteJid, { text: '❌ No videos found!' }, q);
-            }
-            videoUrl = videos[0].url;
-            videoTitle = videos[0].title;
-            videoThumbnail = videos[0].thumbnail;
-        }
-
-        // Thumbnail + "Downloading..." (never blocks the download if it fails)
-        try {
-            const ytId = (videoUrl.match(YT_REGEX) || [])[1];
-            const thumb = videoThumbnail || (ytId ? `https://i.ytimg.com/vi/${ytId}/sddefault.jpg` : undefined);
-            if (thumb) {
-                await client.sendMessage(remoteJid, {
-                    image: { url: thumb },
-                    caption: `*${videoTitle || searchQuery}*\n⏳ Downloading...`
-                }, q);
-            }
-        } catch (e) { console.error('[VIDEO] thumb error:', e?.message || e); }
-
-        const apiMethods = [
-            { name: 'EliteProTech', method: () => getEliteProTechVideoByUrl(videoUrl) },
-            { name: 'Yupra', method: () => getYupraVideoByUrl(videoUrl) },
-            { name: 'Okatsu', method: () => getOkatsuVideoByUrl(videoUrl) }
-        ];
-
-        let videoData = null;
-        const failures = [];
-        for (const api of apiMethods) {
-            try {
-                const data = await api.method();
-                if (data?.download) { videoData = data; break; }
-                console.log(`[VIDEO] ${api.name} returned no download URL, trying next API...`);
-            } catch (apiErr) {
-                console.log(`[VIDEO] ${api.name} failed:`, apiErr.message);
-                failures.push(`${api.name}: ${apiErr.code || apiErr.response?.status || apiErr.message}`.slice(0, 80));
-            }
-        }
-
-        if (!videoData) {
-            throw new Error(`All download sources failed. The content may be unavailable or blocked in your region.\n${failures.join('\n')}`);
-        }
-
-        const title = videoData.title || videoTitle || 'Video';
-        const payload = {
-            mimetype: 'video/mp4',
-            fileName: `${title.replace(/[^\w\s-]/g, '').trim() || 'video'}.mp4`,
-            caption: `*${title}*\n\n> *_Downloaded By ${OWNER_NAME}_*`
-        };
-
-        // Try sending by URL first; if WhatsApp can't fetch it, download the file ourselves.
-        try {
-            await client.sendMessage(remoteJid, { video: { url: videoData.download }, ...payload }, q);
-        } catch (sendErr) {
-            console.log('[VIDEO] send by URL failed, retrying with buffer:', sendErr?.message || sendErr);
-            const buffer = await downloadBuffer(videoData.download);
-            await client.sendMessage(remoteJid, { video: buffer, ...payload }, q);
-        }
-
-    } catch (error) {
-        console.error('[VIDEO] Command Error:', error?.message || error);
-
-        let errorMessage = '❌ Failed to download video.';
-        if (error.response?.status === 451 || error.status === 451) {
-            errorMessage = '❌ Content unavailable (451). This may be due to legal restrictions or regional blocking.';
-        } else if (error.message?.includes('All download sources failed')) {
-            errorMessage = `❌ ${error.message}`;
-        } else if (error.message) {
-            errorMessage = '❌ Download failed: ' + error.message;
-        }
-
-        await client.sendMessage(remoteJid, { text: errorMessage }, q);
+        buffer = await downloadMediaMessage(fake, 'buffer', {}, { reuploadRequest: client.updateMediaMessage });
+    } catch (e1) {
+        console.log('[vv] download failed, retrying:', e1?.message || e1);
+        try { buffer = await downloadMediaMessage(fake, 'buffer', {}); }
+        catch (e2) { console.log('[vv] download failed again:', e2?.message || e2); }
     }
+
+    if (!buffer || !buffer.length) {
+        try { await client.sendMessage(remoteJid, { react: { text: '❌', key: message.key } }); } catch {}
+        return say('❌ Could not download this media (it may have expired or was already opened on the phone).');
+    }
+
+    const caption = `👁️ Recovered ✅\n\n> *_Powered by ${OWNER_NAME}_*`;
+    const payload = media.kind === 'image' ? { image: buffer, caption }
+        : media.kind === 'video' ? { video: buffer, caption, mimetype: 'video/mp4' }
+        : { audio: buffer, mimetype: media.node.mimetype || 'audio/mpeg', ptt: Boolean(media.node.ptt) };
+
+    await client.sendMessage(remoteJid, payload, q);
+    try { await client.sendMessage(remoteJid, { react: { text: '✅', key: message.key } }); } catch {}
 }
 
-export default { video };
+export default viewonce;
