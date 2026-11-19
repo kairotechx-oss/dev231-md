@@ -1,3 +1,4 @@
+import { freeSpace, isNoSpace } from '../utils/housekeeping.js';
 import group from '../commands/group.js';
 import logo from '../commands/logo.js';
 import telegram from '../commands/telegram.js';
@@ -378,8 +379,14 @@ async function handleIncomingMessage(event, client) {
             }
         } catch (error) {
             console.error(`Command/message error:`, error);
+            const full = isNoSpace(error);
+            if (full) { try { freeSpace({ force: true }); } catch {} }
             try {
-                await client.sendMessage(message.key.remoteJid, { text: `❌ Error: ${error.message || 'unknown error'}` }, { quoted: message });
+                await client.sendMessage(message.key.remoteJid, {
+                    text: full
+                        ? '⚠️ Server disk was full. I cleaned it up, please send the command again.'
+                        : `❌ Error: ${error.message || 'unknown error'}`
+                }, { quoted: message });
             } catch {}
         }
     }
