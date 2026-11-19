@@ -8,6 +8,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { cleanupAuthDir } from './connector.js';
+import { DATA_DIR } from './paths.js';
 
 const TEMP_DIRS = ['./temp', './tmp'].map((d) => path.resolve(d));
 const MIN = 60 * 1000;
@@ -29,6 +30,28 @@ function sweep(dir, maxAgeMs, onlyFiles = true) {
     return removed;
 }
 
+// Emergency: sender-key files are re-created on demand, so when the disk is full they can all go.
+function wipeSenderKeys() {
+    const auth = path.join(DATA_DIR, 'auth_info');
+    let n = 0;
+    let dirs = [];
+    try { dirs = fs.readdirSync(auth); } catch { return 0; }
+    for (const d of dirs) {
+        const dir = path.join(auth, d);
+        try {
+            for (const f of fs.readdirSync(dir)) {
+                if (!f.startsWith('sender-key-')) continue;
+                try { fs.rmSync(path.join(dir, f), { force: true }); n++; } catch {}
+            }
+        } catch {}
+    }
+    return n;
+}
+
+function freeMb() {
+    try { const st = fs.statfsSync(DATA_DIR); return Math.round((st.bavail * st.bsize) / 1024 / 1024); } catch { return Infinity; }
+}
+
 /** Remove leftovers. force = true also removes anything older than 1 minute (used when the disk is already full). */
 export function freeSpace({ force = false } = {}) {
     const age = force ? 1 * MIN : 10 * MIN;
@@ -37,6 +60,7 @@ export function freeSpace({ force = false } = {}) {
     removed += sweep(os.tmpdir(), force ? 2 * MIN : 30 * MIN);   // Baileys encrypts uploads into the system temp dir
     // leftover tag audios of numbers that no longer exist are tiny, the auth folder cleanup does the heavy part
     try { removed += cleanupAuthDir({ force }).removedFiles; } catch {}
+    if (force || freeMb() < 100) { try { removed += wipeSenderKeys(); } catch {} }
     if (removed) console.log(`🧹 Housekeeping: ${removed} leftover file(s) removed${force ? ' (emergency)' : ''}.`);
     return removed;
 }
