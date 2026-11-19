@@ -53,7 +53,8 @@ const page = `<!doctype html>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>${BOT_NAME} v${BOT_VERSION} — WhatsApp Pairing</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet"></noscript>
 <style>
 :root{
   --bg:#04141a;--glass:rgba(255,255,255,.055);--glass-2:rgba(255,255,255,.09);--line:rgba(120,255,214,.18);
@@ -248,7 +249,7 @@ input::placeholder{color:#4b6d68}
 
 <button class="to-top" id="toTop" aria-label="Back to top">${icon('up')}</button>
 
-<audio id="pairSound" preload="auto" src="${SOUND_SRC}"></audio>
+<audio id="pairSound" preload="none" src="${SOUND_SRC}"></audio>
 <script>
 const numberEl=document.getElementById('number');
 const generate=document.getElementById('generate');
@@ -424,7 +425,7 @@ export async function startPairingServer(handleMessage) {
             if (req.method === 'GET' && url.pathname === '/logo.jpg') {
                 try {
                     const buf = fs.readFileSync(LOGO_PATH);
-                    res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=3600' });
+                    res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': buf.length, 'Cache-Control': 'public, max-age=86400' });
                     return res.end(buf);
                 } catch {
                     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
