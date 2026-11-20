@@ -49,32 +49,20 @@ ${list.map((c) => `┊ ◈ ${prefix}${c}${ALIASES[c] ? ' (' + ALIASES[c].join(',
     const options = { quoted: message };
     const imagePath = path.join(process.cwd(), 'menu.jpg');
 
-    // 1) Banner with a SHORT caption (a 3000+ character caption can be refused by WhatsApp).
-    //    If the banner fails for any reason, the menu is still sent as text below.
-    let bannerSent = false;
-    if (fs.existsSync(imagePath)) {
-        try {
-            await client.sendMessage(remoteJid, { image: fs.readFileSync(imagePath), caption: header }, options);
-            bannerSent = true;
-        } catch (e) {
-            console.log('[menu] banner failed:', e?.message || e);
+    // Same look as before: ONE message, banner image on top and the whole menu as its caption.
+    const caption = `${header}\n\n${sections}\n\n${extra}`;
+    try {
+        if (fs.existsSync(imagePath)) {
+            await client.sendMessage(remoteJid, { image: fs.readFileSync(imagePath), caption }, options);
+        } else {
+            await client.sendMessage(remoteJid, { text: caption }, options);
         }
+    } catch (e) {
+        // Only if WhatsApp refuses the single message (disk full, caption refused...): send the menu as plain text.
+        console.log('[menu] single message failed, sending as text:', e?.message || e);
+        await client.sendMessage(remoteJid, { text: caption }, options);
     }
 
-    // 2) The full menu as plain text, split in chunks so no message is too long.
-    const blocks = [...(bannerSent ? [] : [header]), ...sections.split('\n\n'), extra];
-    const chunks = [];
-    let cur = '';
-    for (const b of blocks) {
-        if (cur && (cur.length + b.length + 2) > 3000) { chunks.push(cur); cur = ''; }
-        cur += (cur ? '\n\n' : '') + b;
-    }
-    if (cur) chunks.push(cur);
-    for (const c of chunks) {
-        await client.sendMessage(remoteJid, { text: c }, options);
-    }
-
-    // 3) Optional audio: never allowed to break the menu.
     const audioPath = path.join(process.cwd(), 'menu.mp3');
     if (fs.existsSync(audioPath)) {
         try {
