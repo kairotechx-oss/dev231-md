@@ -52,15 +52,41 @@ import { OWNER_NUM } from '../config.js';
 export let creator = [`${OWNER_NUM}@s.whatsapp.net`];
 export let premium = [`${OWNER_NUM}@s.whatsapp.net`];
 
+function unwrapMessage(m) {
+    let cur = m || {};
+    for (let i = 0; i < 5; i++) {
+        const inner = cur.ephemeralMessage?.message
+            || cur.viewOnceMessage?.message
+            || cur.viewOnceMessageV2?.message
+            || cur.viewOnceMessageV2Extension?.message
+            || cur.documentWithCaptionMessage?.message
+            || cur.editedMessage?.message?.protocolMessage?.editedMessage
+            || cur.editedMessage?.message;
+        if (!inner) break;
+        cur = inner;
+    }
+    return cur;
+}
+
 function getText(message) {
+    const m = unwrapMessage(message.message);
     return (
+        m.conversation ||
+        m.extendedTextMessage?.text ||
+        m.imageMessage?.caption ||
+        m.videoMessage?.caption ||
+        m.documentMessage?.caption ||
         message.message?.conversation ||
         message.message?.extendedTextMessage?.text ||
-        message.message?.imageMessage?.caption ||
-        message.message?.videoMessage?.caption ||
         ''
     );
 }
+
+// A hook that never answers (half-dead socket, slow network) must never block a command like .menu.
+const withTimeout = (promise, ms, fallback) => Promise.race([
+    Promise.resolve(promise),
+    new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
+]);
 
 async function handleIncomingMessage(event, client) {
     const number = client.user?.id?.split(':')[0] || '';
@@ -110,22 +136,24 @@ async function handleIncomingMessage(event, client) {
             // Automatic features are isolated from the command router.
             // A failure in an optional feature must never prevent .menu or any command.
             const safeAuto = async (name, fn) => {
-                try { await fn(); }
+                try { await withTimeout(fn(), 6000); }
                 catch (err) { console.warn(`[auto:${name}]`, err?.message || err); }
             };
-            await safeAuto('autotype', () => auto.autotype(message, client));
-            await safeAuto('autorecord', () => auto.autorecord(message, client));
+            // Presence/typing/react hooks run in the background: they must never delay the command.
+            const bg = (name, fn) => { Promise.resolve().then(fn).catch((err) => console.warn(`[auto:${name}]`, err?.message || err)); };
+            bg('autotype', () => auto.autotype(message, client));
+            bg('autorecord', () => auto.autorecord(message, client));
+            bg('presence', () => presence(message, client, userConfig.online));
+            bg('autoreact', () => reactions.auto(message, client, userConfig.autoreact, userConfig.emoji || '🧑‍💻'));
             await safeAuto('tag-response', () => tag.respond(message, client, lid));
             await safeAuto('link-detection', () => group.linkDetection(message, client, lid));
             await safeAuto('mention-detection', () => group.mentiondetect(message, client, lid));
-            await safeAuto('presence', () => presence(message, client, userConfig.online));
-            await safeAuto('autoreact', () => reactions.auto(message, client, userConfig.autoreact, userConfig.emoji || '🧑‍💻'));
 
             // antidelete / antigrouptag / autojoingc hooks
-            try { await more.passive(message, client); } catch {}
+            try { await withTimeout(more.passive(message, client), 6000); } catch {}
 
             // ZONIC game: answers (1 / 2 / 3) of a run that is in progress
-            try { if (await zonic.answer(message, client)) continue; }
+            try { if (await withTimeout(zonic.answer(message, client), 6000, false)) continue; }
             catch (err) { console.warn('[zonic]', err?.message || err); }
 
             await safeAuto('status-saver', () => extras.statusSaver(message, client));
@@ -154,9 +182,10 @@ async function handleIncomingMessage(event, client) {
             const remoteNumber = remoteJid.split('@')[0];
             const ownerNumber = String(OWNER_NUM).replace(/\D/g, '');
 
-            const isOwner = message.key?.fromMe ||
+            const isOwner = Boolean(message.key?.fromMe) ||
                 participantNumber === ownerNumber ||
                 remoteNumber === ownerNumber ||
+                (number && (participantNumber === number || remoteNumber === number)) ||
                 lid.includes(participant) ||
                 lid.includes(remoteJid);
 
@@ -185,8 +214,9 @@ async function handleIncomingMessage(event, client) {
                 continue;
             }
 
-            await react();
+            react();
 
+            const dispatch = async () => {
             switch (command) {
                 case 'menu': return await info(message, client);
                 case 'alive': return await newCommands.alive(message, client);
@@ -377,6 +407,8 @@ async function handleIncomingMessage(event, client) {
                 default:
                     return await client.sendMessage(remoteJid, { text: `*❓ Unknown command:* ${prefix}${command}\n*Use ${prefix}menu*` }, { quoted: message });
             }
+            };
+            await dispatch();
         } catch (error) {
             console.error(`Command/message error:`, error);
             const full = isNoSpace(error);
