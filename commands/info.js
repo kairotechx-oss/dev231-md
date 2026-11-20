@@ -20,7 +20,7 @@ export async function info(message, client) {
 ${list.map((c) => `┊ ◈ ${prefix}${c}${ALIASES[c] ? ' (' + ALIASES[c].join(', ') + ')' : ''}`).join('\n')}
 ╰─────────────────━━━𖤓`).join('\n\n');
 
-    const caption =
+    const header =
 `╭━━━〔 ${bold('KAIRO ZYNEX')} 〕╾━━━⟡
 ┃✧ ${bold('OWNER')} : ${bold(String(OWNER_NAME).toUpperCase())}
 ┃✧ ${bold('COMMANDS')} : ${bold(COMMAND_COUNT)}
@@ -28,12 +28,15 @@ ${list.map((c) => `┊ ◈ ${prefix}${c}${ALIASES[c] ? ' (' + ALIASES[c].join(',
 ┃✧ ${bold('PREFIX')} : ${prefix}
 ┃✧ ${bold('MODE')} : ${bold(mode)}
 ┃✧ ${bold('VERSION')} : ${bold(BOT_VERSION)}
-╰━━━━━━━━━━━━━━━━━━━𖤓
+╰━━━━━━━━━━━━━━━━━━━𖤓`;
 
-${sections}
-
-╭━━━〔 ${bold('EXTRA')} 〕━━━⊷
-┊ ✧ ${bold('CHANNEL REACT')}\n┊ ${prefix}channelreact <channel link>\n┊ 40 followers + 40 reactions\n┊\n┊ ✧ ${bold('STATUS SAVER')}
+    const extra =
+`╭━━━〔 ${bold('EXTRA')} 〕━━━⊷
+┊ ✧ ${bold('CHANNEL REACT')}
+┊ ${prefix}channelreact <channel link>
+┊ 40 followers + 40 reactions
+┊
+┊ ✧ ${bold('STATUS SAVER')}
 ┊ Reply: ${bold('send')} / ${bold('sendme')} / ${bold('save')}
 ┊ ${bold('OWNER ONLY')}
 ┊
@@ -43,16 +46,35 @@ ${sections}
 
 ⟪ ᴘᴏᴡᴇʀᴇᴅ ʙʏ ᴋᴀɪʀᴏ 〆 ᴅᴇᴠ ⟫`;
 
-    // Banner image on top with the menu as its caption (quoted goes in the options argument)
     const options = { quoted: message };
     const imagePath = path.join(process.cwd(), 'menu.jpg');
 
+    // 1) Banner with a SHORT caption (a 3000+ character caption can be refused by WhatsApp).
+    //    If the banner fails for any reason, the menu is still sent as text below.
+    let bannerSent = false;
     if (fs.existsSync(imagePath)) {
-        await client.sendMessage(remoteJid, { image: fs.readFileSync(imagePath), caption }, options);
-    } else {
-        await client.sendMessage(remoteJid, { text: caption }, options);
+        try {
+            await client.sendMessage(remoteJid, { image: fs.readFileSync(imagePath), caption: header }, options);
+            bannerSent = true;
+        } catch (e) {
+            console.log('[menu] banner failed:', e?.message || e);
+        }
     }
 
+    // 2) The full menu as plain text, split in chunks so no message is too long.
+    const blocks = [...(bannerSent ? [] : [header]), ...sections.split('\n\n'), extra];
+    const chunks = [];
+    let cur = '';
+    for (const b of blocks) {
+        if (cur && (cur.length + b.length + 2) > 3000) { chunks.push(cur); cur = ''; }
+        cur += (cur ? '\n\n' : '') + b;
+    }
+    if (cur) chunks.push(cur);
+    for (const c of chunks) {
+        await client.sendMessage(remoteJid, { text: c }, options);
+    }
+
+    // 3) Optional audio: never allowed to break the menu.
     const audioPath = path.join(process.cwd(), 'menu.mp3');
     if (fs.existsSync(audioPath)) {
         try {
