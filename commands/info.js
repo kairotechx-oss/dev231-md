@@ -72,9 +72,9 @@ ${list.map((c) => `┊ ◈ ${prefix}${c}${ALIASES[c] ? ' (' + ALIASES[c].join(',
         await client.sendMessage(remoteJid, { text: caption }, options);
     }
 
-    // Optional menu sound: only when MENU_AUDIO=1 is set (off by default so the menu stays a single message).
+    // Optional menu sound: sent right after the menu (set MENU_AUDIO=0 to turn it off).
     const audioPath = path.join(process.cwd(), 'menu.mp3');
-    if (process.env.MENU_AUDIO === '1' && fs.existsSync(audioPath)) {
+    if (process.env.MENU_AUDIO !== '0' && fs.existsSync(audioPath)) {
         try {
             await client.sendMessage(remoteJid, { audio: fs.readFileSync(audioPath), mimetype: 'audio/mpeg', ptt: false }, options);
         } catch (e) {
