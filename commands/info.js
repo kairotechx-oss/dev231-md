@@ -1,6 +1,7 @@
 import configManager from '../utils/manageConfigs.js';
 import { OWNER_NAME, BOT_VERSION } from '../config.js';
 import { bold, CATEGORIES, COMMAND_COUNT, ALIASES } from '../utils/commandList.js';
+import { freeSpace, isNoSpace } from '../utils/housekeeping.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -48,23 +49,32 @@ ${list.map((c) => `┊ ◈ ${prefix}${c}${ALIASES[c] ? ' (' + ALIASES[c].join(',
 
     const options = { quoted: message };
     const imagePath = path.join(process.cwd(), 'menu.jpg');
-
-    // Same look as before: ONE message, banner image on top and the whole menu as its caption.
     const caption = `${header}\n\n${sections}\n\n${extra}`;
-    try {
+
+    // ONE message only (banner + whole menu as caption). No second text, no audio.
+    const sendOnce = async () => {
         if (fs.existsSync(imagePath)) {
-            await client.sendMessage(remoteJid, { image: fs.readFileSync(imagePath), caption }, options);
-        } else {
-            await client.sendMessage(remoteJid, { text: caption }, options);
+            return client.sendMessage(remoteJid, { image: fs.readFileSync(imagePath), caption }, options);
         }
+        return client.sendMessage(remoteJid, { text: caption }, options);
+    };
+
+    try {
+        await sendOnce();
     } catch (e) {
-        // Only if WhatsApp refuses the single message (disk full, caption refused...): send the menu as plain text.
-        console.log('[menu] single message failed, sending as text:', e?.message || e);
+        // Disk full: clean up and retry automatically, the user never has to send .menu twice.
+        if (isNoSpace(e)) {
+            try { freeSpace({ force: true }); } catch {}
+            try { await sendOnce(); return; } catch (e2) { e = e2; }
+        }
+        console.log('[menu] image failed, sending ONE text message instead:', e?.message || e);
+        // Text needs no temp file on disk, so it works even when the disk is full.
         await client.sendMessage(remoteJid, { text: caption }, options);
     }
 
+    // Optional menu sound: only when MENU_AUDIO=1 is set (off by default so the menu stays a single message).
     const audioPath = path.join(process.cwd(), 'menu.mp3');
-    if (fs.existsSync(audioPath)) {
+    if (process.env.MENU_AUDIO === '1' && fs.existsSync(audioPath)) {
         try {
             await client.sendMessage(remoteJid, { audio: fs.readFileSync(audioPath), mimetype: 'audio/mpeg', ptt: false }, options);
         } catch (e) {
