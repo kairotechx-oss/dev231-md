@@ -454,8 +454,25 @@ export async function restoreSessions(handler, { batchSize = Number(process.env.
 let watchdogTimer = null;
 export function startWatchdog(handler, { everyMs = 60 * 1000, staleMs = 3 * 60 * 1000 } = {}) {
     if (watchdogTimer) return watchdogTimer;
+    let allOfflineSince = 0;
     watchdogTimer = setInterval(async () => {
         const now = Date.now();
+        // Last safety net: if saved sessions exist but NOT ONE is online for 15 minutes,
+        // the process is stuck. Exit so Railway restarts the container and restores everything
+        // (no manual redeploy needed, sessions stay valid).
+        try {
+            const all = Object.values(sessions);
+            const online = all.filter((e) => e?.user).length;
+            if (all.length && online === 0) {
+                allOfflineSince = allOfflineSince || now;
+                if (now - allOfflineSince > 15 * 60 * 1000) {
+                    console.error('🛑 Watchdog: every session offline for 15 min, restarting the process.');
+                    process.exit(1);
+                }
+            } else {
+                allOfflineSince = 0;
+            }
+        } catch {}
         for (const [number, entry] of Object.entries(sessions)) {
             if (entry?.user || entry?.starting) continue;
             if (!entry?.closedAt || now - entry.closedAt < staleMs) continue;
