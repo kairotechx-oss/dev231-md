@@ -399,10 +399,19 @@ function publicPairing(value) {
     return rest;
 }
 
-setInterval(() => {
-    const limit = Date.now() - 10 * 60 * 1000;
-    for (const [n, v] of pairings) if (v.startedAt < limit) pairings.delete(n);
-}, 5 * 60 * 1000).unref();
+setInterval(async () => {
+    const now = Date.now();
+    for (const [n, v] of pairings) {
+        // a code nobody typed in within 5 min is dead: remove it and its folder
+        if (v.status !== 'connected' && now - v.startedAt > 5 * 60 * 1000) {
+            pairings.delete(n);
+            if (lastPairing?.number === n) lastPairing = null;
+            try { (await import('../utils/connector.js')).discardUnpaired(n); } catch {}
+        } else if (v.startedAt < now - 10 * 60 * 1000) {
+            pairings.delete(n);
+        }
+    }
+}, 60 * 1000).unref();
 
 export function getPairingState() {
     return lastPairing ? publicPairing(lastPairing) : null;
@@ -478,6 +487,8 @@ export async function startPairingServer(handleMessage) {
                 if (current?.status === 'waiting' && Date.now() - current.startedAt > PAIRING_STALE_MS) {
                     pairings.delete(number);
                     current = null;
+                    // the old code was never used: delete its half-created session/folder
+                    try { (await import('../utils/connector.js')).discardUnpaired(number); } catch {}
                 }
 
                 if (current?.status === 'waiting') {
@@ -506,6 +517,11 @@ export async function startPairingServer(handleMessage) {
                         // Fired once WhatsApp actually finishes linking, so the
                         // pairing page stops waiting on the old code.
                         setPairing(number, { status: 'connected', code: null });
+                        // linked: forget this pairing request shortly after (the page has seen "connected")
+                        setTimeout(() => {
+                            if (pairings.get(number)?.status === 'connected') pairings.delete(number);
+                            if (lastPairing?.number === number) lastPairing = null;
+                        }, 2 * 60 * 1000).unref();
                     });
                 } catch (err) {
                     setPairing(number, { status: 'error', code: null, message: err.message });
