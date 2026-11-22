@@ -70,11 +70,7 @@ async function sendJoinLeave(sock, groupId, groupMetadata, participant, type) {
     if (custom) {
         caption = fill(custom, { number, group: groupName, description: groupDesc });
     } else if (type === 'add') {
-        const timeString = new Date().toLocaleString('en-US', {
-            month: '2-digit', day: '2-digit', year: 'numeric',
-            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true
-        });
-        caption = `╭╼━≪•𝙽𝙴𝚆 𝙼𝙴𝙼𝙱𝙴𝚁•≫━╾╮\n┃𝚆𝙴𝙻𝙲𝙾𝙼𝙴: @${number} 👋\n┃Member count: #${memberCount}\n┃𝚃𝙸𝙼𝙴: ${timeString}⏰\n╰━━━━━━━━━━━━━━━╯\n\n*@${number}* Welcome to *${groupName}*! 🎉\n*Group 𝙳𝙴𝚂𝙲𝚁𝙸𝙿𝚃𝙸𝙾𝙽*\n${groupDesc}\n\n🤖 *Bot:* ${BOT_URL}\n📢 *Channel:* ${CHANNEL_URL}\n\n> *Powered by KAIRO ZYNEX*`;
+        caption = `👋 Welcome *@${number}* to *${groupName}*! 🎉\n\nWe are happy to have you here. Enjoy your stay and respect the group rules. 🤝\n\n> *Powered by KAIRO ZYNEX*`;
     } else {
         caption = `*@${number}* we will never miss you! 👋\n\n> *Powered by KAIRO ZYNEX*`;
     }
