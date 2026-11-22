@@ -118,6 +118,7 @@ export function listSessionNumbers() {
 // Remove EVERYTHING about a number: session list, DB backup, auth folder, primary config.
 // Used when a user logs out / unlinks the bot from their phone, so the disk is freed
 // and the number is no longer part of the bot.
+const forbiddenCounts = new Map();
 function purgeSession(number) {
     const num = normalizeNumber(number);
     const entry = sessions[num];
@@ -287,7 +288,9 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
         defaultQueryTimeoutMs: 60000,
         retryRequestDelayMs: 500,
         syncFullHistory: false,
-        shouldSyncHistoryMessage: () => false,
+        // Baileys 7 warns that disabling this breaks LID mappings (session errors, messages/menus timing out).
+        // Keep it ON; syncFullHistory stays false so only the small initial sync is received.
+        shouldSyncHistoryMessage: () => true,
         emitOwnEvents: false,
         generateHighQualityLinkPreview: false,
     });
@@ -327,6 +330,7 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
             sessions[number].sock = sock;
             sessions[number].user = sock.user;
             sessions[number].retries = 0;
+            forbiddenCounts.delete(number);
             saveSessionNumber(number);
 
             if (makePrimary) {
@@ -377,6 +381,19 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
                 console.log(`🚪 Session ${number} logged out, removing it and freeing its files.`);
                 purgeSession(number);
                 return;
+            }
+
+            // 403 = WhatsApp refuses this number (banned/restricted). Retrying forever only
+            // spams the logs and wastes resources: after 8 failures in a row, remove it.
+            if (statusCode === DisconnectReason.forbidden) {
+                const n = (forbiddenCounts.get(number) || 0) + 1;
+                forbiddenCounts.set(number, n);
+                if (n >= 8) {
+                    console.log(`🚫 Session ${number} refused by WhatsApp (403) ${n} times, removing it.`);
+                    forbiddenCounts.delete(number);
+                    purgeSession(number);
+                    return;
+                }
             }
 
             if (statusCode === DisconnectReason.connectionReplaced) {
