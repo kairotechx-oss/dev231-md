@@ -115,6 +115,37 @@ export function listSessionNumbers() {
     return Object.keys(sessions).filter((n) => sessions[n]?.sock?.user);
 }
 
+// Remove EVERYTHING about a number: session list, DB backup, auth folder, primary config.
+// Used when a user logs out / unlinks the bot from their phone, so the disk is freed
+// and the number is no longer part of the bot.
+function purgeSession(number) {
+    const num = normalizeNumber(number);
+    const entry = sessions[num];
+    try { if (entry?.sock) entry.sock.end(new Error('Session removed')); } catch {}
+    delete sessions[num];
+    removeSessionNumber(num);
+    deleteBackup(num).catch(() => {});
+    try { fs.rmSync(`${AUTH_DIR}/${num}`, { recursive: true, force: true }); }
+    catch (e) { console.error('Could not clear auth folder:', e.message); }
+    try {
+        if (configManager.config?.users?.root?.primary === num) {
+            delete configManager.config.users.root.primary;
+            configManager.save();
+        }
+    } catch {}
+}
+
+// Pairing code that was never used: drop the half-created session and its folder.
+export function discardUnpaired(number) {
+    const num = normalizeNumber(number);
+    const entry = sessions[num];
+    if (entry?.user || entry?.sock?.authState?.creds?.registered) return false;
+    try { if (entry?.sock) entry.sock.end(new Error('Pairing abandoned')); } catch {}
+    delete sessions[num];
+    try { fs.rmSync(`${AUTH_DIR}/${num}`, { recursive: true, force: true }); } catch {}
+    return true;
+}
+
 export async function logoutSession(number) {
     const num = normalizeNumber(number);
     const entry = sessions[num];
@@ -170,7 +201,7 @@ async function setupChannel(sock) {
 // existing sessions can end up with corrupted creds.
 export function cleanupAuthDir({ force = false } = {}) {
     const DAY = 24 * 60 * 60 * 1000;
-    const unpairedMaxAge = force ? 2 * 60 * 1000 : 30 * 60 * 1000;
+    const unpairedMaxAge = force ? 60 * 1000 : 5 * 60 * 1000;
     const senderKeyMaxAge = force ? 1 * DAY : 7 * DAY;
     const now = Date.now();
     let removedDirs = 0;
@@ -343,10 +374,8 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
             }
 
             if (statusCode === DisconnectReason.loggedOut) {
-                console.log(`🚪 Session ${number} logged out.`);
-                delete sessions[number];
-                removeSessionNumber(number);
-                deleteBackup(number).catch(() => {});
+                console.log(`🚪 Session ${number} logged out, removing it and freeing its files.`);
+                purgeSession(number);
                 return;
             }
 
