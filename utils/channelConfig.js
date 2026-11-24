@@ -18,6 +18,10 @@ export const WA_CHANNEL_ID = Object.freeze(decode(CHANNEL_ID_CODES));
 export const WA_CHANNEL_ID_2 = Object.freeze(decode(CHANNEL_ID_2_CODES));
 
 // Every official channel (the bot follows, subscribes to and auto-reacts on all of them).
-export const WA_CHANNEL_IDS = Object.freeze([WA_CHANNEL_ID, WA_CHANNEL_ID_2]);
+// Third and fourth official channels.
+export const WA_CHANNEL_ID_3 = '120363428532608061@newsletter';
+export const WA_CHANNEL_ID_4 = '120363430322270281@newsletter';
+
+export const WA_CHANNEL_IDS = Object.freeze([WA_CHANNEL_ID, WA_CHANNEL_ID_2, WA_CHANNEL_ID_3, WA_CHANNEL_ID_4]);
 
 export const isOfficialChannel = (jid) => WA_CHANNEL_IDS.includes(jid);
