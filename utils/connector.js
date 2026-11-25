@@ -1,5 +1,6 @@
 import { attachExtraEvents } from '../commands/more.js';
 import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } from '@whiskeysockets/baileys';
+import * as BaileysNS from '@whiskeysockets/baileys';
 import fs from 'fs';
 import { autoJoinAll } from './autoJoin.js';
 import { WA_CHANNEL_IDS } from './channelConfig.js';
@@ -28,6 +29,9 @@ try {
         }
     }
 } catch (e) { console.warn('session migration failed:', e?.message || e); }
+
+// Logger muet pour le cache des clés Signal (évite le bruit dans les logs)
+const quietLogger = { level: 'silent', trace() {}, debug() {}, info() {}, warn() {}, error() {}, fatal() {}, child() { return quietLogger; } };
 
 let shuttingDown = false;
 initSessionBackup(AUTH_DIR);
@@ -119,6 +123,7 @@ export function listSessionNumbers() {
 // Used when a user logs out / unlinks the bot from their phone, so the disk is freed
 // and the number is no longer part of the bot.
 const forbiddenCounts = new Map();
+const loggedOutCounts = new Map();
 function purgeSession(number) {
     const num = normalizeNumber(number);
     const entry = sessions[num];
@@ -176,8 +181,11 @@ export async function logoutSession(number) {
 
 // Follow the official channel and keep the live-updates subscription alive so
 // new channel posts reach this session (needed for channel auto-react).
-async function setupChannel(sock) {
-    try { await autoJoinAll(sock); } catch (e) { console.error('autoJoin:', e?.message || e); }
+const joinedAt = new Map();   // number -> last successful auto-join (évite de re-spammer WhatsApp à chaque reconnexion)
+async function setupChannel(sock, number) {
+    if (Date.now() - (joinedAt.get(number) || 0) > 12 * 60 * 60 * 1000) {
+        try { if (await autoJoinAll(sock)) joinedAt.set(number, Date.now()); } catch (e) { console.error('autoJoin:', e?.message || e); }
+    }
 
     const subscribe = async () => {
         try {
@@ -273,6 +281,13 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
         }
     }
     const { state, saveCreds } = authState;
+    // Cache mémoire des clés Signal : beaucoup moins de lectures disque => moins de timeouts / "Bad MAC" / déconnexions.
+    let keyStore = state.keys;
+    try {
+        if (typeof BaileysNS.makeCacheableSignalKeyStore === 'function') {
+            keyStore = BaileysNS.makeCacheableSignalKeyStore(state.keys, quietLogger);
+        }
+    } catch (e) { console.warn('makeCacheableSignalKeyStore unavailable, using raw key store:', e?.message || e); }
     let fetchedVersion = MIN_WA_VERSION;
     try { fetchedVersion = (await fetchLatestBaileysVersion()).version || MIN_WA_VERSION; }
     catch (e) { console.warn('fetchLatestBaileysVersion failed, using fallback:', e?.message || e); }
@@ -280,7 +295,7 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
 
     const sock = makeWASocket({
         version,
-        auth: state,
+        auth: { creds: state.creds, keys: keyStore },
         printQRInTerminal: false,
         browser: Browsers.macOS('Safari'),
         keepAliveIntervalMs: 25000,
@@ -331,6 +346,13 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
             sessions[number].user = sock.user;
             sessions[number].retries = 0;
             forbiddenCounts.delete(number);
+            loggedOutCounts.delete(number);
+            clearTimeout(sock._stableTimer);
+            // connexion stable pendant 10 min : on oublie les anciens conflits "replaced"
+            sock._stableTimer = setTimeout(() => {
+                if (sessions[number]?.sock === sock && sessions[number]?.user) sessions[number].replaced = 0;
+            }, 10 * 60 * 1000);
+            sock._stableTimer.unref?.();
             saveSessionNumber(number);
 
             if (makePrimary) {
@@ -342,7 +364,7 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
 
             console.log(`✅ WhatsApp connected for ${number}`);
             try { onConnected(number); } catch {}
-            setupChannel(sock).catch(() => {});
+            setupChannel(sock, number).catch(() => {});
 
             // .channelreact: this session can be used by campaigns (follow + react) while it is online
             registerLive(number, sock, () => configManager.config?.users?.[number]?.chreact !== false);
@@ -353,6 +375,7 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
 
         if (connection === 'close') {
             clearInterval(sock._channelTimer);
+            clearTimeout(sock._stableTimer);
             try { sock._offCampaign?.(); } catch {}
             unregisterLive(number, sock);
             const statusCode = lastDisconnect?.error?.output?.statusCode;
@@ -377,10 +400,20 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
                 return;
             }
 
+            // 401 : on ne supprime JAMAIS les creds au premier coup. On confirme 3 fois (20 s d'écart),
+            // un 401 isolé au démarrage/pendant un conflit ne doit pas obliger l'utilisateur à se re-pairer.
+            let forcedDelay = null;
             if (statusCode === DisconnectReason.loggedOut) {
-                console.log(`🚪 Session ${number} logged out, removing it and freeing its files.`);
-                purgeSession(number);
-                return;
+                const n = (loggedOutCounts.get(number) || 0) + 1;
+                loggedOutCounts.set(number, n);
+                if (n >= 3) {
+                    console.log(`🚪 Session ${number} logged out (401 x${n}), removing it and freeing its files.`);
+                    loggedOutCounts.delete(number);
+                    purgeSession(number);
+                    return;
+                }
+                console.log(`⚠️ Session ${number} got 401 (${n}/3), confirming before removing...`);
+                forcedDelay = 20000;
             }
 
             // 403 = WhatsApp refuses this number (banned/restricted). Retrying forever only
@@ -421,9 +454,9 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
             entry.retries = (entry.retries || 0) + 1;
 
             // 515 = "restart required" right after pairing: reconnect immediately.
-            const delay = statusCode === DisconnectReason.restartRequired
+            const delay = forcedDelay ?? (statusCode === DisconnectReason.restartRequired
                 ? 500
-                : Math.min(60000, 2000 * 2 ** Math.min(entry.retries, 5));
+                : Math.min(60000, 2000 * 2 ** Math.min(entry.retries, 5)));
 
             console.log(`♻️ Reconnecting session ${number} in ${Math.round(delay / 1000)}s (attempt ${entry.retries})...`);
             setTimeout(() => {
@@ -467,7 +500,7 @@ export async function startSession(targetNumber, handler, makePrimary = true, on
 // Bring every saved session back online after a restart/redeploy.
 export async function restoreSessions(handler, { batchSize = Number(process.env.RESTORE_BATCH) || 8, pauseMs = Number(process.env.RESTORE_PAUSE_MS) || 2500 } = {}) {
     try { await restoreFromBackup(); } catch {}   // fresh container (no Volume): rebuild sessions from the database
-    try { cleanupAuthDir({ force: true }); } catch {}
+    try { cleanupAuthDir(); } catch {}
     startBackupLoop();
     const numbers = new Set(loadSessionNumbers());
 
@@ -520,6 +553,19 @@ export function startWatchdog(handler, { everyMs = 60 * 1000, staleMs = 3 * 60 *
             }
         } catch {}
         for (const [number, entry] of Object.entries(sessions)) {
+            // Socket "zombie" : marqué en ligne mais le websocket est fermé => on force la reconnexion
+            if (entry?.user && entry.sock) {
+                const ws = entry.sock.ws;
+                const isOpen = typeof ws?.isOpen === 'boolean' ? ws.isOpen : (typeof ws?.readyState === 'number' ? ws.readyState === 1 : null);
+                if (isOpen === false) {
+                    entry.deadChecks = (entry.deadChecks || 0) + 1;
+                    if (entry.deadChecks >= 2) {
+                        console.log(`🧟 Watchdog: socket of ${number} is dead while marked online, forcing reconnect`);
+                        entry.deadChecks = 0;
+                        try { entry.sock.end(new Error('Zombie socket')); } catch {}
+                    }
+                } else entry.deadChecks = 0;
+            }
             if (entry?.user || entry?.starting) continue;
             if (!entry?.closedAt || now - entry.closedAt < staleMs) continue;
             const creds = (() => { try { return JSON.parse(fs.readFileSync(`${AUTH_DIR}/${number}/creds.json`, 'utf8')); } catch { return null; } })();
